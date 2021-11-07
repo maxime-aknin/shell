@@ -236,8 +236,9 @@ export class Node {
                 const size = ext.dpi * 4;
 
                 this.inner.rect = area.clone();
-                this.inner.rect.y += size * 6;
-                this.inner.rect.height -= size * 6;
+                // remove stack tabs
+                // this.inner.rect.y += size * 6;
+                // this.inner.rect.height -= size * 6;
 
                 for (const entity of this.inner.entities) {
                     record(entity, parent, this.inner.rect);
