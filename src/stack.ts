@@ -17,7 +17,8 @@ const INACTIVE_TAB = 'pop-shell-tab pop-shell-tab-inactive';
 const URGENT_TAB = 'pop-shell-tab pop-shell-tab-urgent';
 const INACTIVE_TAB_STYLE = '#9B8E8A';
 
-export var TAB_HEIGHT: number = 24
+// export var TAB_HEIGHT: number = 24
+export var TAB_HEIGHT: number = 0
 
 interface Tab {
     active: boolean;
