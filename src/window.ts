@@ -112,8 +112,8 @@ export class ShellWindow {
 
     }
 
-    activate(): void {
-        activate(this.ext.conf.default_pointer_position, this.meta);
+    activate(move_mouse: boolean = true): void {
+        activate(move_mouse, this.ext.conf.default_pointer_position, this.meta);
     }
 
     actor_exists(): boolean {
@@ -126,6 +126,7 @@ export class ShellWindow {
                 this.meta.connect('size-changed', () => { this.window_changed() }),
                 this.meta.connect('position-changed', () => { this.window_changed() }),
                 this.meta.connect('workspace-changed', () => { this.workspace_changed() }),
+                this.meta.connect('notify::wm-class', () => { this.wm_class_changed(); }),
                 this.meta.connect('raised', () => { this.window_raised() }),
             );
     }
@@ -253,8 +254,14 @@ export class ShellWindow {
     }
 
     is_single_max_screen(): boolean {
-        let monitor_count = this.meta.get_display().get_n_monitors();
-        return (this.is_maximized() || this.smart_gapped) && monitor_count == 1;
+        const display = this.meta.get_display()
+
+        if (display) {
+            let monitor_count = display.get_n_monitors();
+            return (this.is_maximized() || this.smart_gapped) && monitor_count == 1;
+        }
+
+        return false
     }
 
     is_snap_edge(): boolean {
@@ -269,6 +276,21 @@ export class ShellWindow {
                 wm_class = this.name(ext)
             }
 
+            const role = this.meta.get_role();
+            
+            // Quake-style terminals such as Tilix's quake mode.
+            if (role === "quake") return false;
+
+            // Steam loading window is less than 400px wide and 200px tall
+            if (this.meta.get_title() === "Steam") {
+                const rect = this.rect();
+
+                const is_dialog = rect.width < 400 && rect.height < 200;
+                const is_first_login = rect.width === 432 && rect.height === 438;
+
+                if (is_dialog || is_first_login) return false;
+            }
+
             // Only normal windows will be considered for tiling
             return this.meta.window_type == Meta.WindowType.NORMAL
                 // Transient windows are most likely dialogs
@@ -276,7 +298,7 @@ export class ShellWindow {
                 // If a window lacks a class, it's probably a web browser dialog
                 && wm_class !== null
                 // Blacklist any windows that happen to leak through our filter
-                && !ext.conf.window_shall_float(wm_class, this.meta.get_title());
+                && !ext.conf.window_shall_float(wm_class, this.title());
         };
 
         return !ext.contains_tag(this.entity, Tags.Floating)
@@ -380,6 +402,11 @@ export class ShellWindow {
         this.move(ext, br, () => place_pointer_on(this.ext.conf.default_pointer_position, this.meta));
     }
 
+    title(): string {
+        const title = this.meta.get_title();
+        return title ? title : this.name(this.ext)
+    }
+
 
     wm_role(): string | null {
         return this.extra.wm_role_.get_or_init(() => {
@@ -435,8 +462,8 @@ export class ShellWindow {
      */
     restack(updateState: RESTACK_STATE = RESTACK_STATE.NORMAL) {
         this.update_border_layout();
-        if (this.meta.is_fullscreen() || 
-            (this.is_single_max_screen() && !this.is_snap_edge()) || 
+        if (this.meta.is_fullscreen() ||
+            (this.is_single_max_screen() && !this.is_snap_edge()) ||
             this.meta.minimized) {
             this.hide_border()
         }
@@ -518,7 +545,7 @@ export class ShellWindow {
     }
 
     update_border_layout() {
-        let {x, y, width, height} = this.meta.get_frame_rect();
+        let { x, y, width, height } = this.meta.get_frame_rect();
 
         const border = this.border;
         let borderSize = this.border_size;
@@ -579,6 +606,15 @@ export class ShellWindow {
         }
     }
 
+    private wm_class_changed() {
+        if (this.is_tilable(this.ext)) {
+            this.ext.connect_window(this);
+            if (!this.meta.minimized) {
+                this.ext.auto_tiler?.auto_tile(this.ext, this, this.ext.init);
+            }
+        }
+    }
+
     private window_changed() {
         this.update_border_layout();
         this.show_border();
@@ -598,12 +634,15 @@ export class ShellWindow {
 }
 
 /// Activates a window, and moves the mouse point.
-export function activate(default_pointer_position: Config.DefaultPointerPosition, win: Meta.Window) {
-    win.raise();
-    win.unminimize();
-    win.activate(global.get_current_time());
+export function activate(move_mouse: boolean, default_pointer_position: Config.DefaultPointerPosition, win: Meta.Window) {
+    const workspace = win.get_workspace()
+    if (!workspace) return
 
-    if (!pointer_already_on_window(win)) {
+    win.unminimize();
+    workspace.activate_with_focus(win, global.get_current_time())
+    win.raise()
+
+    if (move_mouse && !pointer_already_on_window(win)) {
         place_pointer_on(default_pointer_position, win)
     }
 }

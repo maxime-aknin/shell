@@ -1,8 +1,8 @@
 .pop-shell-active-hint {
     border-style: solid;
-    border-color: #FFAD00;
+    border-color: #FBB86C;
     border-radius: 5px;
-    box-shadow: inset 0 0 0 1px rgba(200, 200, 200, 0);
+    box-shadow: inset 0 0 0 1px rgba(24, 23, 23, 0)
 }
 
 .pop-shell-overlay {
@@ -18,9 +18,9 @@
 }
 
 .pop-shell-search-element:select{
-    background: rgba(0, 0, 0, .1);
+    background: #fff;
     border-radius: 5px;
-    color: #393634;
+    color: #000;
 }
 
 .pop-shell-search-icon {
@@ -50,7 +50,7 @@
 }
 
 .pop-shell-tab-active {
-    background: #FFAD00;
+    background: #FBB86C;
 }
 
 .pop-shell-tab-inactive {
@@ -59,4 +59,8 @@
 
 .pop-shell-tab-urgent {
     background: #D00;
+}
+
+.pop-shell-entry:indeterminate {
+    font-style: italic
 }

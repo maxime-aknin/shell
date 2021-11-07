@@ -199,8 +199,10 @@ export class AutoTiler {
         const result = this.fetch_mode(ext, win, ignore_focus);
         this.detach_window(ext, win.entity);
         if (result.kind == ERR) {
+            log.debug(`attach to workspace: ${result.value}`)
             this.attach_to_workspace(ext, win, ext.workspace_id(win));
         } else {
+            log.debug(`attaching to window ${win.entity}`)
             this.attach_to_window(ext, result.value, win,  { auto: 0 })
         }
     }
@@ -655,7 +657,7 @@ export class AutoTiler {
             return Err('ignoring focus');
         }
 
-        const prev = ext.prev_focused[0]
+        const prev = ext.previously_focused(win)
 
         if (!prev) {
             return Err('no window has been previously focused');

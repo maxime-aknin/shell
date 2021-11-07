@@ -14,7 +14,7 @@ import * as Rect from 'rectangle';
 import * as Settings from 'settings';
 import * as Tiling from 'tiling';
 import * as Window from 'window';
-import * as launcher from 'dialog_launcher';
+import * as launcher from 'launcher';
 import * as auto_tiler from 'auto_tiler';
 import * as node from 'node';
 import * as utils from 'utils';
@@ -29,7 +29,8 @@ import type { Entity } from 'ecs';
 import type { ExtEvent } from 'events';
 import type { Rectangle } from 'rectangle';
 import type { Indicator } from 'panel_settings';
-import type { Launcher } from './dialog_launcher';
+import type { Launcher } from 'launcher';
+
 import { Fork } from './fork';
 
 const display = global.display;
@@ -43,7 +44,7 @@ const GLib: GLib = imports.gi.GLib;
 const { Gio, Meta, St, Shell } = imports.gi;
 const { GlobalEvent, WindowEvent } = Events;
 const { cursor_rect, is_move_op } = Lib;
-const { layoutManager, loadTheme, overview, panel, setThemeStylesheet, screenShield, sessionMode } = imports.ui.main;
+const { layoutManager, loadTheme, overview, panel, setThemeStylesheet, screenShield, sessionMode, windowAttentionHandler } = imports.ui.main;
 const { ScreenShield } = imports.ui.screenShield;
 const { AppSwitcher, AppIcon, WindowSwitcherPopup } = imports.ui.altTab;
 const { SwitcherList } = imports.ui.switcherPopup;
@@ -51,11 +52,11 @@ const { Workspace } = imports.ui.workspace;
 const { WorkspaceThumbnail } = imports.ui.workspaceThumbnail;
 const Tags = Me.imports.tags;
 
-const STYLESHEET_PATHS = ['light', 'dark'].map(stylesheet_path);
+const STYLESHEET_PATHS = ['light', 'dark', 'highcontrast'].map(stylesheet_path);
 const STYLESHEETS = STYLESHEET_PATHS.map((path) => Gio.File.new_for_path(path));
 const GNOME_VERSION = imports.misc.config.PACKAGE_VERSION;
 
-enum Style { Light, Dark }
+enum Style { Light, Dark, HighContrast }
 
 interface Display {
     area: Rectangle;
@@ -107,7 +108,7 @@ export class Ext extends Ecs.System<ExtEvent> {
     column_size: number = 32;
 
     /** The currently-loaded theme variant */
-    current_style: Style = this.settings.is_dark_shell() ? Style.Dark : Style.Light;
+    current_style: Style = Style.Dark;
 
     /** Set when the display configuration has been triggered for execution */
     displays_updating: SignalID | null = null;
@@ -151,7 +152,7 @@ export class Ext extends Ecs.System<ExtEvent> {
     injections: Array<Injection> = new Array();
 
     /** The window that was focused before the last window */
-    prev_focused: [null | Entity, null | Entity] = [null, null];
+    private prev_focused: [null | Entity, null | Entity] = [null, null];
 
     tween_signals: Map<string, [SignalID, any]> = new Map();
 
@@ -169,9 +170,6 @@ export class Ext extends Ecs.System<ExtEvent> {
     private signals: Map<GObject.Object, Array<SignalID>> = new Map();
 
     private size_requests: Map<GObject.Object, SignalID> = new Map();
-
-    /** Used to debounce on_focus triggers */
-    private focus_trigger: null | SignalID = null;
 
     // Entity-component associations
 
@@ -217,6 +215,7 @@ export class Ext extends Ecs.System<ExtEvent> {
         super(new Executor.GLibExecutor());
 
         this.load_settings();
+        this.reload_theme()
 
         this.register_fn(() => load_theme(this.current_style));
 
@@ -239,6 +238,29 @@ export class Ext extends Ecs.System<ExtEvent> {
         this.dbus.FocusLeft = () => this.focus_left()
         this.dbus.FocusRight = () => this.focus_right()
         this.dbus.Launcher = () => this.window_search.open(this)
+
+        this.dbus.WindowFocus = (window: [number, number]) => {
+            this.windows.get(window)?.activate()
+            this.window_search.close()
+        }
+
+        this.dbus.WindowList = (): Array<[[number, number], string, string]> => {
+            const wins = new Array()
+
+            for (const window of this.tab_list(Meta.TabList.NORMAL, null)) {
+                wins.push([
+                    window.entity,
+                    window.title(),
+                    window.name(this)
+                ])
+            }
+
+            return wins;
+        }
+
+        this.dbus.WindowQuit = (win: [number, number]) => {
+            this.windows.get(win)?.meta.delete(global.get_current_time())
+        }
     }
 
     // System interface
@@ -398,30 +420,6 @@ export class Ext extends Ecs.System<ExtEvent> {
         return window ? window.meta.get_compositor_private() : null;
     }
 
-    attach_config(): [any, SignalID] {
-        const monitor = this.conf_watch = Gio.File.new_for_path(Config.CONF_FILE)
-            .monitor(Gio.FileMonitorFlags.NONE, null);
-
-        return [monitor, monitor.connect('changed', () => {
-            this.conf.reload()
-
-            // If the auto-tilable status of a window has changed, detach or attach the window.
-            if (this.auto_tiler) {
-                const at = this.auto_tiler;
-                for (const [entity, window] of this.windows.iter()) {
-                    const attachment = at.attached.get(entity);
-                    if (window.is_tilable(this)) {
-                        if (!attachment) {
-                            at.auto_tile(this, window, this.init);
-                        }
-                    } else if (attachment) {
-                        at.detach_window(this, entity)
-                    }
-                }
-            }
-        })];
-    }
-
     /// Connects a callback signal to a GObject, and records the signal.
     connect(object: GObject.Object, property: string, callback: (...args: any) => boolean | void): SignalID {
         const signal = object.connect(property, callback);
@@ -503,9 +501,14 @@ export class Ext extends Ecs.System<ExtEvent> {
                 let wmclass = win.meta.get_wm_class();
                 if (wmclass) this.conf.add_window_exception(
                     wmclass,
-                    win.meta.get_title()
+                    win.title()
                 );
                 this.exception_dialog()
+            },
+            // Reload the tiling config on dialog close
+            () => {
+                this.conf.reload()
+                this.tiling_config_reapply()
             }
         );
         d.open();
@@ -513,35 +516,50 @@ export class Ext extends Ecs.System<ExtEvent> {
 
     exception_dialog() {
         let path = Me.dir.get_path() + "/floating_exceptions/main.js";
+        const cancellable = new Gio.Cancellable();
 
-        utils.async_process(["gjs", path], null, null)
-            .then(output => {
-                log.debug(`Floating Window Dialog Event: ${output}`)
-                switch (output.trim()) {
-                    case "SELECT":
-                        this.register_fn(() => this.exception_select())
+        const event_handler = (event: string): boolean => {
+            switch (event) {
+                case "MODIFIED":
+                    this.register_fn(() => {
+                        this.conf.reload()
+                        this.tiling_config_reapply()
+                    })
+                    break
+                case "SELECT":
+                    this.register_fn(() => this.exception_select())
+                    return false
+            }
+
+            return true
+        }
+
+        const ipc = utils.async_process_ipc(["gjs", path])
+
+        if (ipc) {
+            const generator = (stdout: any, res: any) => {
+                try {
+                    const [bytes,] = stdout.read_line_finish(res)
+                    if (bytes) {
+                        if (event_handler((imports.byteArray.toString(bytes) as string).trim())) {
+                            ipc.stdout.read_line_async(0, cancellable, generator)
+                        }
+                    }
+                } catch (why) {
+                    log.error(`failed to read response from floating exceptions dialog: ${why}`)
                 }
-            })
-            .catch(error => {
-                log.error(`floating window process error: ${error}`)
-            })
+            }
+
+            ipc.stdout.read_line_async(0, cancellable, generator)
+        }
     }
 
     exception_select() {
-        if (GNOME_VERSION?.startsWith("3.36")) {
-            // 3.36 required a delay to work
-            GLib.timeout_add(GLib.PRIORITY_LOW, 500, () => {
-                this.exception_selecting = true
-                overview.show()
-                return false
-            })
-        } else {
-            GLib.idle_add(GLib.PRIORITY_LOW, () => {
-                this.exception_selecting = true
-                overview.show()
-                return false
-            })
-        }
+        GLib.timeout_add(GLib.PRIORITY_LOW, 500, () => {
+            this.exception_selecting = true
+            overview.show()
+            return false
+        })
     }
 
     exit_modes() {
@@ -771,8 +789,11 @@ export class Ext extends Ecs.System<ExtEvent> {
             this.exception_add(win)
         }
 
-        this.prev_focused[0] = this.prev_focused[1];
-        this.prev_focused[1] = win.entity;
+        // Track history of focused windows, but do not permit duplicates.
+        if (this.prev_focused[1] !== win.entity) {
+            this.prev_focused[0] = this.prev_focused[1];
+            this.prev_focused[1] = win.entity;
+        }
 
         // Update the active tab in the stack.
         if (null !== this.auto_tiler && null !== win.stack) {
@@ -782,7 +803,7 @@ export class Ext extends Ecs.System<ExtEvent> {
 
         this.show_border_on_focused();
 
-        if (this.auto_tiler && this.prev_focused[0] !== null) {
+        if (this.auto_tiler && win.is_tilable(this) && this.prev_focused[0] !== null) {
             let prev = this.windows.get(this.prev_focused[0]);
             let is_attached = this.auto_tiler.attached.contains(this.prev_focused[0]);
 
@@ -1044,6 +1065,17 @@ export class Ext extends Ecs.System<ExtEvent> {
         } else if (this.settings.snap_to_grid()) {
             this.tiler.snap(this, win);
         }
+    }
+
+    previously_focused(active: Window.ShellWindow): null | Ecs.Entity {
+        for (const id of [1, 0]) {
+            const prev = this.prev_focused[id]
+            if (prev && ! Ecs.entity_eq(active.entity, prev)) {
+                return prev;
+            }
+        }
+
+        return null
     }
 
     movement_is_valid(win: Window.ShellWindow, movement: movement.Movement) {
@@ -1348,11 +1380,19 @@ export class Ext extends Ecs.System<ExtEvent> {
     }
 
     on_gtk_shell_changed() {
-        load_theme(this.settings.is_dark_shell() ? Style.Dark : Style.Light);
+        this.reload_theme();
+        load_theme(this.current_style)
     }
 
     on_gtk_theme_change() {
-        load_theme(this.settings.is_dark_shell() ? Style.Dark : Style.Light);
+        this.reload_theme()
+        load_theme(this.current_style)
+    }
+
+    reload_theme() {
+        this.current_style = this.settings.is_dark()
+            ? Style.Dark
+            : this.settings.is_high_contrast() ? Style.HighContrast : Style.Light
     }
 
     /** Handle window maximization notifications */
@@ -1668,7 +1708,7 @@ export class Ext extends Ecs.System<ExtEvent> {
 
     /** Begin listening for signals from windows, and add any pre-existing windows. */
     signals_attach() {
-        this.conf_watch = this.attach_config();
+        // this.conf_watch = this.attach_config();
 
         this.tiler.queue.start(100, (movement) => {
             movement()
@@ -1937,6 +1977,23 @@ export class Ext extends Ecs.System<ExtEvent> {
         }
     }
 
+    /// If the auto-tilable status of a window has changed, detach or attach the window.
+    tiling_config_reapply() {
+        if (this.auto_tiler) {
+            const at = this.auto_tiler;
+            for (const [entity, window] of this.windows.iter()) {
+                const attachment = at.attached.get(entity);
+                if (window.is_tilable(this)) {
+                    if (!attachment) {
+                        at.auto_tile(this, window, this.init);
+                    }
+                } else if (attachment) {
+                    at.detach_window(this, entity)
+                }
+            }
+        }
+    }
+
     toggle_tiling() {
         if (this.settings.tile_by_default()) {
             this.auto_tile_off();
@@ -2000,7 +2057,7 @@ export class Ext extends Ecs.System<ExtEvent> {
                 let actor = window.meta.get_compositor_private();
                 if (actor) {
                     if (!window.meta.minimized) {
-                        tiler.auto_tile(this, window, false);
+                        tiler.auto_tile(this, window, true);
                     }
                 }
             }
@@ -2433,6 +2490,8 @@ function enable() {
     ext.injections_add();
     ext.signals_attach();
 
+    disable_window_attention_handler()
+
     layoutManager.addChrome(ext.overlay);
 
     if (!indicator) {
@@ -2481,6 +2540,25 @@ function disable() {
     if (indicator) {
         indicator.destroy();
         indicator = null;
+    }
+
+    enable_window_attention_handler()
+}
+
+const handler = windowAttentionHandler
+
+function enable_window_attention_handler() {
+    if (handler && !handler._windowDemandsAttentionId) {
+        handler._windowDemandsAttentionId = global.display.connect('window-demands-attention', (display, window) => {
+            handler._onWindowDemandsAttention(display, window)
+        })
+    }
+}
+
+function disable_window_attention_handler() {
+    if (handler && handler._windowDemandsAttentionId) {
+        global.display.disconnect(handler._windowDemandsAttentionId);
+        handler._windowDemandsAttentionId = null
     }
 }
 
@@ -2582,7 +2660,7 @@ function _show_skip_taskbar_windows(ext: Ext) {
                         // are skip taskbar true
                         (meta_win.get_wm_class() !== null &&
                          !gnome_shell_wm_class) ||
-                    default_isoverviewwindow_ws(win);
+                    default_isoverviewwindow_ws(win));
             };
         }
     }

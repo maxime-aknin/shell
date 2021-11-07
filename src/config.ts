@@ -38,6 +38,7 @@ export const DEFAULT_FLOAT_RULES: Array<FloatRule> = [
     { class: "KotatogramDesktop", title: "Media viewer" },
     { class: "Steam", title: "^((?!Steam).)*$" },
     { class: "TelegramDesktop", title: "Media viewer" },
+    { class: "tilda", },
     { class: "Solaar", },
     { class: "system76-driver", },
     { class: "zoom", },
@@ -45,6 +46,10 @@ export const DEFAULT_FLOAT_RULES: Array<FloatRule> = [
     { class: "Gjs", title: "Settings" },
     { class: "Io.elementary.sideload", },
     { class: "Gnome-initial-setup" },
+    { class: "Steam", title: "^.*(Guard|Login).*" },
+    { class: "krunner" },
+    { class: "ibus-.*" },
+    { class: "gjs" }
 ];
 
 export interface WindowRule {

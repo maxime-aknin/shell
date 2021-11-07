@@ -193,9 +193,11 @@ declare namespace Meta {
         get_maximized(): number;
         get_monitor(): number;
         get_pid(): number;
+        get_role(): null | string;
         get_stable_sequence(): number;
-        get_title(): string;
+        get_title(): null | string;
         get_transient_for(): Window | null;
+        get_user_time(): number;
         get_wm_class(): string | null;
         get_wm_class_instance(): string | null;
         get_work_area_for_monitor(monitor: number): null | Rectangular;
